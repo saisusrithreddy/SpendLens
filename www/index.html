@@ -320,4 +320,701 @@
 // ============================================================
 const SUPABASE_URL = "https://jupnrnkxuhmwneuvmdpo.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_59Q5kfxJFwm228MyQ2tccg_3GNNKu9i";
-const APK_DOWNLOAD_URL = "https://github.com/YOUR_GITHUB_USERNAME/spendlens/releases/latest/download/SpendLens.apk";
+const APK_DOWNLOAD_URL = "https://github.com/saisusrithreddy/SpendLens/releases/latest/download/SpendLens.apk";
+  const sb = window.supabase.createClient(SUPABASE_URL.trim(), SUPABASE_ANON_KEY.trim());
+
+// ============================================================
+// CREDIT CARD REWARD CATALOG
+// ============================================================
+const CARD_CATALOG = {
+  sbi_cashback: {
+    name: "SBI Cashback Credit Card", bank: "SBI",
+    summary: "5% online spends, 1% offline (Excl. utilities & fuel)",
+    rateFn: (cat) => {
+      if (["Fuel", "Bills & Utilities"].includes(cat)) return { rate: 0, note: "Excluded category" };
+      if (["Online Shopping", "Food & Dining", "Groceries", "Travel & Commute", "Subscriptions"].includes(cat)) return { rate: 0.05, note: "5% online cashback" };
+      return { rate: 0.01, note: "1% base cashback" };
+    }
+  },
+  hdfc_swiggy: {
+    name: "Swiggy HDFC Bank Card", bank: "HDFC",
+    summary: "10% Swiggy/Instamart, 5% major online, 1% base",
+    rateFn: (cat, m = "") => {
+      const ml = m.toLowerCase();
+      if (/swiggy|instamart/.test(ml)) return { rate: 0.10, note: "10% Swiggy cashback" };
+      if (["Online Shopping", "Subscriptions"].includes(cat) || /amazon|flipkart|myntra|uber|ola|nykaa/.test(ml)) return { rate: 0.05, note: "5% online partner" };
+      if (cat === "Fuel") return { rate: 0, note: "Fuel excluded" };
+      return { rate: 0.01, note: "1% base cashback" };
+    }
+  },
+  hdfc_millennia: {
+    name: "HDFC Millennia Card", bank: "HDFC",
+    summary: "5% Amazon/Flipkart/Swiggy/Zomato/Uber, 1% base",
+    rateFn: (cat, m = "") => {
+      if (/amazon|flipkart|swiggy|zomato|myntra|uber|bookmyshow|cult|sony/.test(m.toLowerCase())) return { rate: 0.05, note: "5% partner merchant" };
+      if (cat === "Fuel") return { rate: 0, note: "Fuel excluded" };
+      return { rate: 0.01, note: "1% base cashback" };
+    }
+  },
+  icici_amazon: {
+    name: "Amazon Pay ICICI Card", bank: "ICICI",
+    summary: "5% Amazon Prime, 2% bill pay, 1% everywhere",
+    rateFn: (cat, m = "") => {
+      if (/amazon/.test(m.toLowerCase())) return { rate: 0.05, note: "5% Amazon Prime" };
+      if (cat === "Bills & Utilities") return { rate: 0.02, note: "2% Amazon Pay bills" };
+      return { rate: 0.01, note: "1% unlimited cashback" };
+    }
+  },
+  axis_airtel: {
+    name: "Airtel Axis Bank Card", bank: "Axis",
+    summary: "25% Airtel, 10% Utilities/Swiggy/Zomato/BigBasket, 1% base",
+    rateFn: (cat, m = "") => {
+      const ml = m.toLowerCase();
+      if (/airtel/.test(ml)) return { rate: 0.25, note: "25% Airtel cashback" };
+      if (cat === "Bills & Utilities") return { rate: 0.10, note: "10% utility cashback" };
+      if (/swiggy|zomato|bigbasket/.test(ml)) return { rate: 0.10, note: "10% partner cashback" };
+      if (cat === "Fuel") return { rate: 0, note: "Fuel excluded" };
+      return { rate: 0.01, note: "1% base cashback" };
+    }
+  },
+  axis_ace: {
+    name: "Axis Bank ACE Card", bank: "Axis",
+    summary: "5% GPay bills, 4% Swiggy/Zomato/Ola, 1.5% all other",
+    rateFn: (cat, m = "") => {
+      if (cat === "Bills & Utilities") return { rate: 0.05, note: "5% GPay utility bills" };
+      if (/swiggy|zomato|ola/.test(m.toLowerCase())) return { rate: 0.04, note: "4% partner cashback" };
+      if (cat === "Fuel") return { rate: 0, note: "Fuel excluded" };
+      return { rate: 0.015, note: "1.5% unlimited base" };
+    }
+  },
+  tata_neu_infinity: {
+    name: "Tata Neu Infinity RuPay", bank: "HDFC",
+    summary: "5% Tata brands & bills on Neu, 1.5% UPI & base",
+    rateFn: (cat, m = "") => {
+      if (/bigbasket|croma|air india|tata|1mg|westside/.test(m.toLowerCase()) || cat === "Bills & Utilities") return { rate: 0.05, note: "5% NeuCoins" };
+      if (cat === "Fuel") return { rate: 0, note: "Fuel excluded" };
+      return { rate: 0.015, note: "1.5% UPI & base" };
+    }
+  },
+  sbi_bpcl_octane: {
+    name: "BPCL SBI Card Octane", bank: "SBI",
+    summary: "7.25% BPCL fuel, 2.5% dining/groceries, 0.25% base",
+    rateFn: (cat) => {
+      if (cat === "Fuel") return { rate: 0.0725, note: "7.25% BPCL fuel return" };
+      if (["Food & Dining", "Groceries"].includes(cat)) return { rate: 0.025, note: "2.5% dining/groceries" };
+      return { rate: 0.0025, note: "0.25% base" };
+    }
+  }
+};
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+let authMode = "login";
+let currentUser = null;
+let transactions = [];
+let cardMap = {};
+let categoryChart = null;
+let nativeListenerAttached = false;
+
+function isNativeAndroid() {
+  return Boolean(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+}
+
+function getSmsBridge() {
+  return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.SmsBridge;
+}
+
+// ============================================================
+// AUTHENTICATION FLOW
+// ============================================================
+function setAuthMode(mode) {
+  authMode = mode;
+  document.getElementById("nameFieldWrap").classList.toggle("hidden", mode === "login");
+  document.getElementById("modeLoginBtn").className = mode === "login"
+    ? "flex-1 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white"
+    : "flex-1 py-2 text-xs font-semibold rounded-lg text-slate-400";
+  document.getElementById("modeSignupBtn").className = mode === "signup"
+    ? "flex-1 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white"
+    : "flex-1 py-2 text-xs font-semibold rounded-lg text-slate-400";
+  document.getElementById("authSubmitBtn").textContent = mode === "login" ? "Sign In to My Dashboard" : "Create My Free Account";
+  document.getElementById("authError").classList.add("hidden");
+}
+
+async function handleAuthSubmit(e) {
+  e.preventDefault();
+  const email = document.getElementById("authEmail").value.trim();
+  const password = document.getElementById("authPass").value;
+  const fullName = document.getElementById("authName").value.trim();
+  const errEl = document.getElementById("authError");
+  const btn = document.getElementById("authSubmitBtn");
+
+  errEl.classList.add("hidden");
+  btn.disabled = true;
+  btn.textContent = "Please wait...";
+
+  try {
+    if (authMode === "signup") {
+      const { data, error } = await sb.auth.signUp({
+        email,
+        password,
+        options: { data: { full_name: fullName || email.split("@")[0] } }
+      });
+      if (error) throw error;
+      if (data.user) {
+        await sb.from("profiles").upsert({ id: data.user.id, full_name: fullName || email.split("@")[0] });
+      }
+      if (!data.session) {
+        errEl.textContent = "Account created! Check your email to confirm, then sign in.";
+        errEl.className = "text-xs text-emerald-400";
+        errEl.classList.remove("hidden");
+      }
+    } else {
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    }
+  } catch (err) {
+    errEl.textContent = err.message || "Authentication failed";
+    errEl.className = "text-xs text-rose-400";
+    errEl.classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = authMode === "login" ? "Sign In to My Dashboard" : "Create My Free Account";
+  }
+}
+
+async function signOut() {
+  await sb.auth.signOut();
+}
+
+// ============================================================
+// BOOTSTRAP & SESSION LISTENER
+// ============================================================
+async function initApp() {
+  document.getElementById("publicApkBtn").href = APK_DOWNLOAD_URL;
+  document.getElementById("dashApkBtn").href = APK_DOWNLOAD_URL;
+  if (isNativeAndroid()) {
+    document.getElementById("publicApkBtn").classList.add("hidden");
+  }
+
+  document.getElementById("newCardType").innerHTML = Object.entries(CARD_CATALOG)
+    .map(([k, c]) => `<option value="${k}">${c.name} — ${c.summary}</option>`).join("");
+
+  const { data: { session } } = await sb.auth.getSession();
+  onAuthChange(session);
+
+  sb.auth.onAuthStateChange((_event, newSession) => {
+    onAuthChange(newSession);
+  });
+}
+
+async function onAuthChange(session) {
+  if (!session || !session.user) {
+    currentUser = null;
+    transactions = [];
+    cardMap = {};
+    document.getElementById("authScreen").classList.remove("hidden");
+    document.getElementById("appShell").classList.add("hidden");
+    return;
+  }
+
+  currentUser = session.user;
+  document.getElementById("authScreen").classList.add("hidden");
+  document.getElementById("appShell").classList.remove("hidden");
+
+  const displayName = (currentUser.user_metadata && currentUser.user_metadata.full_name) || currentUser.email;
+  document.getElementById("userGreeting").textContent = displayName;
+
+  document.getElementById("androidSmsBanner").classList.toggle("hidden", !isNativeAndroid());
+  document.getElementById("webApkBanner").classList.toggle("hidden", isNativeAndroid());
+
+  await loadUserData();
+
+  if (isNativeAndroid()) {
+    setupNativeSmsBridge();
+  }
+}
+
+async function loadUserData() {
+  if (!currentUser) return;
+  const [txRes, cardRes] = await Promise.all([
+    sb.from("transactions").select("*").order("timestamp", { ascending: false }).limit(500),
+    sb.from("user_cards").select("*")
+  ]);
+
+  transactions = (txRes.data || []).map(r => ({
+    id: r.id,
+    timestamp: r.timestamp,
+    amount: Number(r.amount) || 0,
+    merchant: r.merchant,
+    category: r.category,
+    mode: r.mode,
+    bank: r.bank,
+    cardLast4: r.card_last4 || ""
+  }));
+
+  cardMap = {};
+  (cardRes.data || []).forEach(c => { cardMap[c.card_last4] = c.card_key; });
+
+  renderAll();
+}
+
+// ============================================================
+// NATIVE ANDROID SMS SYNC (CAPACITOR PLUGIN)
+// ============================================================
+async function setupNativeSmsBridge() {
+  const bridge = getSmsBridge();
+  if (!bridge) return;
+
+  try {
+    const perm = await bridge.checkSmsPermission();
+    if (perm && perm.granted) {
+      document.getElementById("androidSmsStatus").textContent = "SMS permission active. Tap Sync or receive new bank SMS automatically.";
+      document.getElementById("restrictedHelpBtn").classList.add("hidden");
+      document.getElementById("android15Guide").classList.add("hidden");
+      await triggerNativeSmsSync(true);
+    }
+
+    if (!nativeListenerAttached && bridge.addListener) {
+      nativeListenerAttached = true;
+      bridge.addListener("smsReceived", async (msg) => {
+        if (!currentUser || !msg || !msg.body) return;
+        const parsed = parseBankSMS(msg.body, msg.sender || "", msg.date);
+        if (parsed) {
+          await saveParsedBatch([parsed], "android-live");
+          await loadUserData();
+        }
+      });
+    }
+  } catch (e) {
+    console.error("SMS bridge error", e);
+  }
+}
+
+async function triggerNativeSmsSync(silent = false) {
+  const bridge = getSmsBridge();
+  if (!bridge) return;
+  const statusEl = document.getElementById("androidSmsStatus");
+  const btn = document.getElementById("nativeSyncBtn");
+  btn.disabled = true;
+  btn.textContent = "Scanning SMS...";
+
+  try {
+    const perm = await bridge.requestSmsPermission();
+    if (!perm || !perm.granted) {
+      statusEl.textContent = "SMS permission not granted yet. On Android 15/16, unlock restricted settings first.";
+      document.getElementById("restrictedHelpBtn").classList.remove("hidden");
+      document.getElementById("android15Guide").classList.remove("hidden");
+      return;
+    }
+
+    document.getElementById("restrictedHelpBtn").classList.add("hidden");
+    document.getElementById("android15Guide").classList.add("hidden");
+
+    const { messages } = await bridge.scanRecentSms({ days: 30 });
+    const parsedList = [];
+    (messages || []).forEach(m => {
+      const p = parseBankSMS(m.body, m.sender || "", m.date);
+      if (p) parsedList.push(p);
+    });
+
+    if (parsedList.length > 0) {
+      await saveParsedBatch(parsedList, "android-inbox");
+      await loadUserData();
+      statusEl.textContent = `Synced ${parsedList.length} bank transactions from the last 30 days (live auto-sync active).`;
+    } else if (!silent) {
+      statusEl.textContent = "Scanned last 30 days — no new bank debit SMS found.";
+    }
+  } catch (err) {
+    statusEl.textContent = "Sync error: " + (err.message || err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "↻ Sync Bank SMS Now";
+  }
+}
+
+async function openAndroidSettings() {
+  const bridge = getSmsBridge();
+  if (bridge && bridge.openAppSettings) {
+    await bridge.openAppSettings();
+  }
+}
+
+async function saveParsedBatch(parsedList, source) {
+  if (!currentUser || !parsedList.length) return;
+  const rows = parsedList.map(p => ({
+    user_id: currentUser.id,
+    dedup_hash: `${Math.floor(new Date(p.timestamp).getTime() / 300000)}_${p.amount}_${p.merchant.toLowerCase()}`,
+    timestamp: p.timestamp,
+    amount: p.amount,
+    merchant: p.merchant,
+    category: p.category,
+    mode: p.mode,
+    bank: p.bank,
+    card_last4: p.cardLast4 || "",
+    source
+  }));
+
+  await sb.from("transactions").upsert(rows, {
+    onConflict: "user_id,dedup_hash",
+    ignoreDuplicates: true
+  });
+}
+
+// ============================================================
+// ON-DEVICE INDIAN BANK SMS PARSER (BLOCKS OTPs & BALANCES)
+// ============================================================
+function parseBankSMS(raw, sender = "", dateMs = null) {
+  const text = String(raw || "").replace(/\s+/g, " ").trim();
+  const lower = text.toLowerCase();
+
+  if (/\b(otp|one time password|verification code|cvv|mpin|login pin|do not share|secret code)\b/i.test(lower)) return null;
+  if (/\b(declined|failed|unsuccessful|reversed|statement generated|minimum due|bill due|due date|will be debited)\b/i.test(lower)) return null;
+
+  const isDebit = /\b(debited|spent|paid|sent|purchased|purchase|charged|withdrawn|txn of|payment of)\b/i.test(lower);
+  const isOnlyCredit = /\b(credited|received|refunded|cashback credited)\b/i.test(lower) && !isDebit;
+  if (!isDebit || isOnlyCredit) return null;
+
+  const spendPart = text.split(/\b(avl\.?\s*bal|available\s*bal|avl\.?\s*lmt|available\s*credit|avail\s*lmt|bal\s*:|limit\s*:)/i)[0];
+  const amtMatch = spendPart.match(/(?:rs\.?|inr|₹)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
+  if (!amtMatch) return null;
+  const amount = Math.round(parseFloat(amtMatch[1].replace(/,/g, "")) * 100) / 100;
+  if (!amount || amount <= 0) return null;
+
+  const bankLookup = [
+    ["HDFC", /hdfc/i], ["ICICI", /icici/i], ["SBI", /\bsbi\b|sbicrd/i],
+    ["Axis", /axis/i], ["Kotak", /kotak/i], ["Amex", /amex|american express/i],
+    ["IDFC", /idfc/i], ["IndusInd", /indusind/i], ["Yes Bank", /yes\s*bank/i], ["BOB", /bobcard|baroda/i]
+  ];
+  let bank = "Bank";
+  for (const [b, rx] of bankLookup) {
+    if (rx.test(text) || rx.test(sender)) { bank = b; break; }
+  }
+
+  let mode = "Bank Account";
+  let cardLast4 = "";
+  const cardMatch = spendPart.match(/(?:card|credit card|debit card|cc|dc)[^0-9]{0,16}(?:x+|ending\s*(?:with|in)?\s*|\*+)?(\d{4})\b/i)
+    || spendPart.match(/(?:xx|\*{2,}|x{1,4})(\d{4})\b/i);
+
+  if (/\bcredit\s*card\b|\bsbicrd\b|\bbobcard\b|\bamex\b/i.test(lower)) mode = "Credit Card";
+  else if (/\bdebit\s*card\b/i.test(lower)) mode = "Debit Card";
+  else if (/\bupi\b|\bvpa\b|@/i.test(lower)) mode = "UPI";
+  else if (/\bcard\b/i.test(lower)) mode = "Credit Card";
+
+  if (cardMatch && mode !== "UPI") cardLast4 = cardMatch[1];
+
+  const mMatch = spendPart.match(/\b(?:at|to|towards|for|info[:\s]+)\s+([A-Za-z0-9@._&\-\s]{2,36}?)(?:\s+(?:on|via|ref|upi|using|dated|for|from|not\s+you)|\.|,|$)/i);
+  let merchant = (mMatch && mMatch[1] ? mMatch[1].replace(/\b(vpa|upi|pos|ecom)\b/gi, "").trim() : "General Merchant").substring(0, 40);
+  if (merchant.length < 2) merchant = "General Merchant";
+
+  const m = merchant.toLowerCase();
+  let category = "Other";
+  if (/zepto|blinkit|instamart|bigbasket|bbnow|dmart|supermarket|grocery/.test(m)) category = "Groceries";
+  else if (/swiggy|zomato|eatsure|dominos|pizza|kfc|mcdonald|starbucks|cafe|coffee|restaurant|bakery/.test(m)) category = "Food & Dining";
+  else if (/amazon|flipkart|myntra|ajio|nykaa|meesho|croma|apple|decathlon|zara/.test(m)) category = "Online Shopping";
+  else if (/uber|ola|rapido|irctc|makemytrip|mmt|goibibo|indigo|air india|cleartrip|redbus|metro|fastag/.test(m)) category = "Travel & Commute";
+  else if (/hpcl|bpcl|iocl|indian oil|bharat petroleum|shell|petrol|fuel/.test(m)) category = "Fuel";
+  else if (/airtel|jio|vi\b|vodafone|bsnl|bescom|tata power|adani|electricity|broadband|gas|water|bbps/.test(m)) category = "Bills & Utilities";
+  else if (/netflix|spotify|hotstar|prime|youtube|chatgpt|openai|google play|apple\.com|icloud|cult/.test(m)) category = "Subscriptions";
+  else if (/apollo|pharmeasy|1mg|medplus|hospital|clinic|pharmacy/.test(m)) category = "Health & Pharmacy";
+
+  return {
+    timestamp: new Date(dateMs || Date.now()).toISOString(),
+    amount, merchant, category, mode, bank, cardLast4
+  };
+}
+
+// ============================================================
+// REWARD OPTIMIZATION & INSIGHTS
+// ============================================================
+function getBestCardFor(category, merchant, amount) {
+  const entries = Object.entries(cardMap).filter(([_, key]) => CARD_CATALOG[key]);
+  if (!entries.length) return null;
+  const ranked = entries.map(([last4, key]) => {
+    const card = CARD_CATALOG[key];
+    const { rate, note } = card.rateFn(category, merchant);
+    return { last4, key, name: card.name, rate, reward: Math.round(amount * rate), note };
+  }).sort((a, b) => b.reward - a.reward || b.rate - a.rate);
+  return { best: ranked[0], all: ranked };
+}
+
+function evaluateTransaction(tx) {
+  let earned = 0;
+  if (tx.cardLast4 && cardMap[tx.cardLast4] && CARD_CATALOG[cardMap[tx.cardLast4]]) {
+    earned = Math.round(tx.amount * CARD_CATALOG[cardMap[tx.cardLast4]].rateFn(tx.category, tx.merchant).rate);
+  }
+  const evalBest = getBestCardFor(tx.category, tx.merchant, tx.amount);
+  const best = evalBest ? evalBest.best : null;
+  const missed = best && best.reward > earned ? best.reward - earned : 0;
+  return { earned, missed, best };
+}
+
+function buildInsightsData() {
+  const total = transactions.reduce((s, t) => s + t.amount, 0) || 1;
+  const explanations = [];
+  const tricks = [];
+  if (!transactions.length) return { explanations, tricks };
+
+  const byCat = {};
+  transactions.forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+  const topCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  if (topCats[0]) {
+    explanations.push({
+      title: `Primary Spend Driver: ${topCats[0][0]}`,
+      detail: `${formatINR(topCats[0][1])} (${Math.round((topCats[0][1] / total) * 100)}% of total spend) went into ${topCats[0][0]}.`
+    });
+  }
+
+  const smallOrders = transactions.filter(t => ["Food & Dining", "Groceries"].includes(t.category) && t.amount <= 450 && /swiggy|zomato|zepto|blinkit|instamart/i.test(t.merchant));
+  if (smallOrders.length >= 2) {
+    const sum = smallOrders.reduce((s, t) => s + t.amount, 0);
+    explanations.push({ title: "Frequent Micro-Orders", detail: `${smallOrders.length} orders under ₹450 totaled ${formatINR(sum)}.` });
+    tricks.push({
+      tag: "Fee Leak", saving: `Save ~${formatINR(Math.round(sum * 0.18))}`,
+      title: "Combine small delivery orders",
+      body: `Orders under ₹450 lose 15–20% to delivery & platform fees. Batching ${smallOrders.length} small baskets into 2 weekly orders eliminates wasted surcharges.`
+    });
+  }
+
+  let missedTotal = 0, worstTx = null;
+  transactions.forEach(t => {
+    const ev = evaluateTransaction(t);
+    missedTotal += ev.missed;
+    if (!worstTx || ev.missed > worstTx.missed) worstTx = { tx: t, ...ev };
+  });
+  if (missedTotal > 0) {
+    explanations.push({ title: "Missed Cashback", detail: `You left ${formatINR(missedTotal)} on the table—biggest miss was ${worstTx.tx.merchant} (+${formatINR(worstTx.missed)}).` });
+    tricks.push({
+      tag: "Card Swap", saving: `Recover ${formatINR(missedTotal)}`,
+      title: "Switch UPI/wrong-card spends to your top reward card",
+      body: `On ${worstTx.tx.merchant}, paying with ${worstTx.best.name} instead of ${worstTx.tx.mode} earns ${formatINR(worstTx.best.reward)} automatically.`
+    });
+  }
+
+  const subs = transactions.filter(t => t.category === "Subscriptions");
+  if (subs.length) {
+    const subSum = subs.reduce((s, t) => s + t.amount, 0);
+    const names = [...new Set(subs.map(s => s.merchant))].join(", ");
+    explanations.push({ title: "Active Subscriptions", detail: `${subs.length} recurring charges (${names}) cost ${formatINR(subSum)}.` });
+    tricks.push({
+      tag: "Subscription Audit", saving: `Save ~${formatINR(Math.round(subSum * 0.4))}/mo`,
+      title: "Rotate OTT & digital subscriptions",
+      body: `Pause overlapping plans among ${names} and route renewals through your 5% online cashback card.`
+    });
+  }
+
+  return { explanations, tricks };
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function renderAll() {
+  renderOverview();
+  renderLedger();
+  runCardFinder();
+  renderWallet();
+  renderTricks();
+  renderCardMappings();
+}
+
+function renderOverview() {
+  const total = transactions.reduce((s, t) => s + t.amount, 0);
+  const catTotals = {}, modeTotals = {};
+  let earned = 0, missed = 0;
+
+  transactions.forEach(tx => {
+    catTotals[tx.category] = (catTotals[tx.category] || 0) + tx.amount;
+    modeTotals[tx.mode] = (modeTotals[tx.mode] || 0) + tx.amount;
+    const ev = evaluateTransaction(tx);
+    earned += ev.earned;
+    missed += ev.missed;
+  });
+
+  const sortedCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
+  document.getElementById("kpiTotal").textContent = formatINR(total);
+  document.getElementById("kpiCount").textContent = `${transactions.length} transactions`;
+  document.getElementById("kpiTopCat").textContent = sortedCats[0] ? sortedCats[0][0] : "—";
+  document.getElementById("kpiTopCatAmt").textContent = sortedCats[0] ? `${formatINR(sortedCats[0][1])} (${Math.round((sortedCats[0][1] / (total || 1)) * 100)}%)` : "₹0";
+  document.getElementById("kpiEarned").textContent = formatINR(earned);
+  document.getElementById("kpiMissed").textContent = formatINR(missed);
+
+  const ctx = document.getElementById("categoryChart");
+  if (categoryChart) categoryChart.destroy();
+  categoryChart = new Chart(ctx, {
+    type: "doughnut",
+    data: {
+      labels: sortedCats.map(c => c[0]),
+      datasets: [{ data: sortedCats.map(c => c[1]), backgroundColor: ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#06b6d4", "#8b5cf6", "#f43f5e", "#64748b"], borderWidth: 0 }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { color: "#cbd5e1", font: { size: 11 } } } } }
+  });
+
+  document.getElementById("modeBars").innerHTML = Object.entries(modeTotals).sort((a, b) => b[1] - a[1]).map(([mode, amt]) => {
+    const pct = total ? Math.round((amt / total) * 100) : 0;
+    return `<div><div class="flex justify-between text-xs mb-1"><span>${esc(mode)}</span><span class="text-slate-400">${formatINR(amt)} (${pct}%)</span></div><div class="h-2 bg-slate-800 rounded-full overflow-hidden"><div class="h-full bg-indigo-500" style="width:${pct}%"></div></div></div>`;
+  }).join("") || `<p class="text-xs text-slate-500">No transactions yet. Sync SMS or paste a bank message to start.</p>`;
+
+  const quick = buildInsightsData();
+  document.getElementById("quickInsights").innerHTML = quick.explanations.slice(0, 3)
+    .map(ex => `<li class="p-2.5 rounded-xl bg-slate-950 border border-slate-800"><span class="font-semibold text-indigo-300">${esc(ex.title)}:</span> ${esc(ex.detail)}</li>`)
+    .join("") || `<li class="text-slate-500">Sync SMS or add sample data to view spending diagnosis.</li>`;
+}
+
+function renderLedger() {
+  const q = (document.getElementById("searchInput").value || "").toLowerCase();
+  const cat = document.getElementById("catFilter").value;
+  const cats = ["Food & Dining", "Groceries", "Online Shopping", "Travel & Commute", "Bills & Utilities", "Subscriptions", "Fuel", "Health & Pharmacy", "Other"];
+
+  const rows = transactions.filter(t => (cat === "ALL" || t.category === cat) && (!q || `${t.merchant} ${t.bank} ${t.cardLast4} ${t.mode}`.toLowerCase().includes(q)));
+  document.getElementById("ledgerBody").innerHTML = rows.map(tx => {
+    const ev = evaluateTransaction(tx);
+    const badge = ev.missed > 0
+      ? `<span class="px-2 py-1 rounded-lg bg-rose-500/15 text-rose-300 border border-rose-500/30">Use <b>${esc(ev.best.name)}</b> (+${formatINR(ev.missed)})</span>`
+      : ev.earned > 0
+        ? `<span class="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">Optimal (+${formatINR(ev.earned)})</span>`
+        : `<span class="text-slate-500">—</span>`;
+    return `
+      <tr class="hover:bg-slate-800/40">
+        <td class="px-4 py-3 text-slate-400 whitespace-nowrap">${new Date(tx.timestamp).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</td>
+        <td class="px-4 py-3 font-medium">${esc(tx.merchant)}</td>
+        <td class="px-4 py-3"><select onchange="updateCategory('${tx.id}', this.value)" class="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-[11px]">${cats.map(c => `<option ${c === tx.category ? "selected" : ""}>${c}</option>`).join("")}</select></td>
+        <td class="px-4 py-3 text-slate-300">${esc(tx.bank)} ${esc(tx.mode)} ${tx.cardLast4 ? `• x${esc(tx.cardLast4)}` : ""}</td>
+        <td class="px-4 py-3 text-right font-semibold">${formatINR(tx.amount)}</td>
+        <td class="px-4 py-3">${badge}</td>
+        <td class="px-4 py-3 text-right"><button onclick="deleteTx('${tx.id}')" class="text-slate-500 hover:text-rose-400">Delete</button></td>
+      </tr>`;
+  }).join("") || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">No transactions found.</td></tr>`;
+}
+
+function runCardFinder() {
+  const res = getBestCardFor(document.getElementById("calcCategory").value, document.getElementById("calcMerchant").value, Number(document.getElementById("calcAmount").value) || 0);
+  const el = document.getElementById("cardFinderResults");
+  if (!res) {
+    el.innerHTML = `<p class="text-xs text-amber-400 col-span-3">Map at least one credit card in "My Cards & SMS" to see live recommendations.</p>`;
+    return;
+  }
+  el.innerHTML = res.all.map((c, i) => `
+    <div class="p-4 rounded-2xl border ${i === 0 ? "bg-indigo-950/50 border-indigo-500" : "bg-slate-950 border-slate-800"}">
+      <div class="flex justify-between text-[11px] mb-1"><span class="${i === 0 ? "text-emerald-400 font-bold" : "text-slate-400"}">${i === 0 ? "★ BEST CARD" : `#${i + 1}`}</span><span class="text-slate-400">x${esc(c.last4)}</span></div>
+      <p class="font-semibold text-sm">${esc(c.name)}</p>
+      <p class="text-xl font-bold mt-2 ${i === 0 ? "text-emerald-400" : "text-slate-200"}">+${formatINR(c.reward)} <span class="text-xs font-normal text-slate-400">(${(c.rate * 100).toFixed(1)}%)</span></p>
+      <p class="text-[11px] text-slate-400 mt-1">${esc(c.note)}</p>
+    </div>`).join("");
+}
+
+function renderWallet() {
+  const entries = Object.entries(cardMap).filter(([_, k]) => CARD_CATALOG[k]);
+  document.getElementById("walletGrid").innerHTML = entries.map(([last4, k]) => {
+    const c = CARD_CATALOG[k];
+    const spent = transactions.filter(t => t.cardLast4 === last4).reduce((s, t) => s + t.amount, 0);
+    return `<div class="p-4 rounded-xl bg-slate-950 border border-slate-800"><div class="flex justify-between text-xs"><span class="font-semibold text-indigo-400">${esc(c.bank)}</span><span class="font-mono text-slate-400">•••• ${esc(last4)}</span></div><p class="font-semibold text-sm mt-1">${esc(c.name)}</p><p class="text-[11px] text-slate-400 mt-1">${esc(c.summary)}</p><p class="text-xs text-slate-300 mt-3 pt-2 border-t border-slate-800">Tracked Spend: <b>${formatINR(spent)}</b></p></div>`;
+  }).join("") || `<p class="text-xs text-slate-500">No credit cards mapped yet.</p>`;
+}
+
+function renderTricks() {
+  const { explanations, tricks } = buildInsightsData();
+  document.getElementById("explanationList").innerHTML = explanations.map(e => `<div class="p-4 rounded-xl bg-slate-950 border border-slate-800"><p class="font-semibold text-sm text-indigo-300">${esc(e.title)}</p><p class="text-xs text-slate-300 mt-1">${esc(e.detail)}</p></div>`).join("") || `<p class="text-xs text-slate-500">No data yet.</p>`;
+  document.getElementById("tricksList").innerHTML = tricks.map(t => `<div class="p-4 rounded-xl bg-slate-950 border border-slate-800"><div class="flex justify-between mb-2"><span class="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 text-[11px] font-semibold">${esc(t.tag)}</span><span class="text-xs font-bold text-emerald-400">${esc(t.saving)}</span></div><p class="font-semibold text-sm">${esc(t.title)}</p><p class="text-xs text-slate-400 mt-1.5">${esc(t.body)}</p></div>`).join("") || `<p class="text-xs text-slate-500">Sync SMS transactions to uncover saving tricks.</p>`;
+}
+
+function renderCardMappings() {
+  const detected = new Set(transactions.map(t => t.cardLast4).filter(Boolean));
+  Object.keys(cardMap).forEach(k => detected.add(k));
+  document.getElementById("cardMappingList").innerHTML = [...detected].map(last4 => {
+    const c = CARD_CATALOG[cardMap[last4]];
+    return `<div class="flex justify-between items-center p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs"><div><span class="font-mono font-bold text-indigo-400">•••• ${esc(last4)}</span> <span class="text-slate-600 mx-1">→</span> <span class="${c ? "text-slate-100" : "text-amber-400"}">${c ? esc(c.name) : "Detected in SMS (map below)"}</span></div>${c ? `<button onclick="removeCardMapping('${last4}')" class="text-rose-400 hover:underline">Remove</button>` : ""}</div>`;
+  }).join("") || `<p class="text-xs text-slate-500">Add your credit cards below.</p>`;
+}
+
+// ============================================================
+// DATABASE MUTATIONS
+// ============================================================
+async function addCardMapping() {
+  const last4 = document.getElementById("newCardLast4").value.replace(/\D/g, "").slice(-4);
+  const key = document.getElementById("newCardType").value;
+  if (last4.length !== 4 || !currentUser) return alert("Enter exactly 4 digits.");
+  await sb.from("user_cards").upsert({ user_id: currentUser.id, card_last4: last4, card_key: key }, { onConflict: "user_id,card_last4" });
+  document.getElementById("newCardLast4").value = "";
+  await loadUserData();
+}
+
+async function removeCardMapping(last4) {
+  if (!currentUser) return;
+  await sb.from("user_cards").delete().eq("user_id", currentUser.id).eq("card_last4", last4);
+  await loadUserData();
+}
+
+async function updateCategory(id, category) {
+  await sb.from("transactions").update({ category }).eq("id", id);
+  await loadUserData();
+}
+
+async function deleteTx(id) {
+  await sb.from("transactions").delete().eq("id", id);
+  await loadUserData();
+}
+
+function openTestModal() { document.getElementById("smsModalStatus").textContent = ""; document.getElementById("smsPasteInput").value = ""; document.getElementById("smsModal").classList.remove("hidden"); }
+function closeTestModal() { document.getElementById("smsModal").classList.add("hidden"); }
+
+async function submitPastedSMS() {
+  const raw = document.getElementById("smsPasteInput").value.trim();
+  const status = document.getElementById("smsModalStatus");
+  const parsed = parseBankSMS(raw);
+  if (!parsed) {
+    status.className = "text-xs text-amber-400";
+    status.textContent = "Blocked: Looks like an OTP, balance alert, or non-debit SMS.";
+    return;
+  }
+  await saveParsedBatch([parsed], "manual-paste");
+  await loadUserData();
+  closeTestModal();
+}
+
+async function seedSampleTransactions() {
+  if (!currentUser) return;
+  const now = Date.now();
+  const samples = [
+    { timestamp: new Date(now - 1*86400000).toISOString(), amount: 340, merchant: "SWIGGY", category: "Food & Dining", mode: "UPI", bank: "HDFC", cardLast4: "" },
+    { timestamp: new Date(now - 2*86400000).toISOString(), amount: 4899, merchant: "AMAZON PAY INDIA", category: "Online Shopping", mode: "Credit Card", bank: "HDFC", cardLast4: "4821" },
+    { timestamp: new Date(now - 3*86400000).toISOString(), amount: 1850, merchant: "BESCOM ELECTRICITY", category: "Bills & Utilities", mode: "Credit Card", bank: "SBI", cardLast4: "7741" },
+    { timestamp: new Date(now - 4*86400000).toISOString(), amount: 649, merchant: "NETFLIX INDIA", category: "Subscriptions", mode: "Credit Card", bank: "HDFC", cardLast4: "4821" },
+    { timestamp: new Date(now - 5*86400000).toISOString(), amount: 310, merchant: "ZEPTO", category: "Groceries", mode: "UPI", bank: "ICICI", cardLast4: "" },
+    { timestamp: new Date(now - 7*86400000).toISOString(), amount: 6200, merchant: "MAKEMYTRIP", category: "Travel & Commute", mode: "Credit Card", bank: "ICICI", cardLast4: "1092" },
+    { timestamp: new Date(now - 9*86400000).toISOString(), amount: 280, merchant: "ZOMATO", category: "Food & Dining", mode: "UPI", bank: "HDFC", cardLast4: "" },
+    { timestamp: new Date(now - 11*86400000).toISOString(), amount: 799, merchant: "AIRTEL BROADBAND", category: "Bills & Utilities", mode: "UPI", bank: "HDFC", cardLast4: "" }
+  ];
+  await saveParsedBatch(samples, "sample");
+  await sb.from("user_cards").upsert([
+    { user_id: currentUser.id, card_last4: "7741", card_key: "sbi_cashback" },
+    { user_id: currentUser.id, card_last4: "1092", card_key: "icici_amazon" },
+    { user_id: currentUser.id, card_last4: "4821", card_key: "hdfc_millennia" }
+  ], { onConflict: "user_id,card_last4" });
+  await loadUserData();
+  switchTab("overview");
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+function switchTab(name) {
+  ["overview", "ledger", "cards", "tricks", "account"].forEach(t => {
+    document.getElementById("view-" + t).classList.toggle("hidden", t !== name);
+    document.getElementById("tab-" + t).className = (t === name ? "tab-active" : "tab-inactive") + " px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap";
+  });
+}
+function formatINR(n) { return "₹" + Math.round(n || 0).toLocaleString("en-IN"); }
+function esc(s) { return String(s || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
+function exportCSV() {
+  const csv = "Date,Merchant,Category,Mode,Bank,CardLast4,Amount\n" + transactions.map(t => `${t.timestamp},"${t.merchant.replace(/"/g, '""')}",${t.category},${t.mode},${t.bank},${t.cardLast4},${t.amount}`).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "spendlens-expenses.csv";
+  a.click();
+}
+
+initApp();
+</script>
+</body>
+</html>

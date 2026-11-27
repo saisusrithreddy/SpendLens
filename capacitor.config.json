@@ -1,0 +1,8 @@
+{
+  "appId": "com.spendlens.app",
+  "appName": "SpendLens",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}
